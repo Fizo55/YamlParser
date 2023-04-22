@@ -3,6 +3,8 @@ using YamlParser.Core;
 using YamlParser.Entities;
 using YamlParser.Extensions;
 using YamlParser.Shared;
+using System.IO;
+using System.Linq;
 
 namespace YamlParser.Plugins
 {
@@ -22,60 +24,36 @@ namespace YamlParser.Plugins
         public void Run()
         {
             var filteredMobsLines = Path.Combine(_configuration.BasePath, _configuration.PacketName).FilterLines(new[] { "in", "c_map" });
-            var mapsMonsters = new List<MapMonster>();
 
-            foreach (var line in filteredMobsLines)
-            {
-                var parts = line.Split(' ');
-                if (parts.Length <= 3 || parts[0] != "c_map") continue;
-
-                var map = short.Parse(parts[2]);
-                if (!File.Exists(Path.Combine(_configuration.BasePath, _configuration.BinaryMapFolder, map.ToString())) ||
-                    !File.Exists(Path.Combine(_configuration.BasePath, _configuration.BinaryMapFolder, parts[3])))
+            var mapsMonsters = filteredMobsLines
+                .SelectMany((line, index) =>
                 {
-                    continue;
-                }
-
-                if (parts.Length <= 7 || parts[0] != "in" || parts[1] != "3") continue;
-
-                var mapMonster = mapsMonsters.FirstOrDefault(s => s.MapId == map);
-                if (mapMonster == null)
-                {
-                    mapMonster = new MapMonster
+                    var parts = line.Split(' ');
+                    if (parts.Length > 3 && parts[0] == "c_map")
                     {
-                        MapId = map,
-                        Monsters = new List<MapMonsterData>()
-                    };
-                }
-
-                mapMonster.Monsters.Add(new MapMonsterData
+                        return new[] { (mapId: int.Parse(parts[2]), lineParts: parts) };
+                    }
+                    return Enumerable.Empty<(int, string[])>();
+                })
+                .Where(tuple => tuple.lineParts.Length > 7 && tuple.lineParts[0] == "in" && tuple.lineParts[1] == "3" && File.Exists(Path.Combine(_configuration.BasePath, _configuration.BinaryMapFolder, tuple.mapId.ToString())) && File.Exists(Path.Combine(_configuration.BasePath, _configuration.BinaryMapFolder, tuple.lineParts[3])))
+                .Select(tuple => new MapMonsterData
                 {
-                    MapMonsterId = int.Parse(parts[3]),
-                    VNum = int.Parse(parts[2]),
-                    MapX = short.Parse(parts[4]),
-                    MapY = short.Parse(parts[5]),
-                    Position = (byte)(parts[6] == string.Empty ? 0 : byte.Parse(parts[6]))
-                });
-
-                mapsMonsters.Add(mapMonster);
-            }
-
-            mapsMonsters = mapsMonsters.Distinct().ToList();
+                    MapMonsterId = int.Parse(tuple.lineParts[3]),
+                    VNum = int.Parse(tuple.lineParts[2]),
+                    MapX = short.Parse(tuple.lineParts[4]),
+                    MapY = short.Parse(tuple.lineParts[5]),
+                    Position = (byte)(tuple.lineParts[6] == string.Empty ? 0 : byte.Parse(tuple.lineParts[6])),
+                    MapId = tuple.mapId
+                })
+                .GroupBy(m => m.MapId)
+                .Select(g => new MapMonster { MapId = g.Key, Monsters = g.ToList() })
+                .ToList();
 
             foreach (var mapMonster in mapsMonsters)
             {
                 if (_mapAlreadyDone.Contains(mapMonster.MapId)) continue;
 
-                var toSerialize = new MapMonster
-                {
-                    MapId = mapMonster.MapId,
-                    Monsters = mapsMonsters
-                        .Where(s => s.MapId == mapMonster.MapId && s.Monsters != null)
-                        .SelectMany(mMonster => mMonster.Monsters)
-                        .ToList()
-                };
-
-                var yaml = _serializer.Serialize(toSerialize);
+                var yaml = _serializer.Serialize(mapMonster);
                 _configuration.CreateFile($"map_{mapMonster.MapId}_monsters", _configuration.MapMonsterFolder, yaml);
                 _mapAlreadyDone.Add(mapMonster.MapId);
             }
